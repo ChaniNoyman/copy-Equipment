@@ -8,16 +8,19 @@ using System.Collections.Generic;
 public class CsvProcessor
 {
     public static string destinationLogFile = @"C:\Users\Chanif\Desktop\C#\CopyExcelFileEquipment\Log.csv";
-    private static readonly string[] searchPhrases = { "ציוד נדרש", "ציוד דרוש", "ציוד:", "ציוד נדרש למדריכים" };
+    private static readonly string[] searchPhrases = { "ציוד נדרש", "ציוד דרוש", "ציוד:", "ציוד נדרש למדריכים", "ציוד נדרש לפעולה", "הכנות וציוד נדרש" };
     private static readonly Regex searchRegex = new Regex(string.Join("|", searchPhrases.Select(Regex.Escape)));
-    private static readonly Regex lineSplitRegex = new Regex(@"(?<!\r)\n"); // פיצול רק לפי LF שלא מגיע אחרי CR
-    private static readonly Regex htmlTagRegex = new Regex(@"<(?!\/?strong\b)([^>]+)>"); // תגית HTML פותחת או סוגרת שאינה STRONG
+    // regex זה לא יהיה בשימוש ישיר לניקוי, כי נשתמש ב-RemoveHtmlTags בצורה גורפת יותר
+    // אבל הוא עדיין שימושי אם תרצה לבדוק תגיות מסוימות בנפרד (כמו ב-SplitAndClean).
+    private static readonly Regex htmlTagRegex = new Regex(@"<(?!\/?(?:strong|b)\b)([^>]+)>");
+
+    private static readonly string[] stopPhrases = { ".", "מהלך הפעולה", "!#!#", @"""," };
 
     // פונקציה להסרת תגיות HTML ממחרוזת
     private static string RemoveHtmlTags(string input)
     {
         string withoutNbsp = input.Replace("&nbsp;", " ");
-        return Regex.Replace(withoutNbsp, "<.*?>", string.Empty);
+        return Regex.Replace(withoutNbsp, "<.*?>", string.Empty); // מסיר את כל תגיות ה-HTML
     }
 
     private static void LogNoCommas(string columnA, string problematicText)
@@ -26,7 +29,7 @@ public class CsvProcessor
         {
             Console.WriteLine(problematicText);
             string cleanedText = RemoveHtmlTags(problematicText);
-            File.AppendAllText(destinationLogFile, $"{columnA}\t{cleanedText}\n"); // סוף שורה LF
+            File.AppendAllText(destinationLogFile, $"{columnA}\t{cleanedText}\n");
             Console.WriteLine("after: " + cleanedText);
         }
         catch (Exception ex)
@@ -41,17 +44,19 @@ public class CsvProcessor
         int startIndex = 0;
         for (int i = 0; i < textToSplit.Length; i++)
         {
+            // התנאים האלה עדיין טובים, גם אם הטקסט כבר נקי מ-HTML,
+            // הם פשוט לא ימצאו תגיות.
             if (textToSplit[i] == ',' &&
                 !textToSplit.Substring(0, i).Contains('.') &&
                 !textToSplit.Substring(0, i).Contains("מהלך הפעולה") &&
-                !textToSplit.Substring(0, i).Contains("!#!#"))
+                !textToSplit.Substring(0, i).Contains("!#!#")) // אין צורך ב-htmlTagRegex.IsMatch כאן, כי כבר ניקינו HTML
             {
                 string part = textToSplit.Substring(startIndex, i - startIndex).Trim();
                 if (part.StartsWith(":") || part.StartsWith("-"))
                 {
                     part = part.Substring(1).Trim();
                 }
-                parts.Add(RemoveHtmlTags(part));
+                parts.Add(part); // אין צורך ב-RemoveHtmlTags כאן שוב, כי הטקסט כבר נקי
                 startIndex = i + 1;
             }
         }
@@ -60,8 +65,8 @@ public class CsvProcessor
         {
             lastPart = lastPart.Substring(1).Trim();
         }
-        parts.Add(RemoveHtmlTags(lastPart));
-        return string.Join("\t", parts); // עדיין משתמש בטאב כהפרדה פנימית לאחר הפיצול
+        parts.Add(lastPart); // אין צורך ב-RemoveHtmlTags כאן שוב
+        return string.Join("\t", parts);
     }
 
     public static void ProcessCsvReadAllText(string sourceFilePath, string destinationFilePath)
@@ -69,52 +74,71 @@ public class CsvProcessor
         try
         {
             string allText = File.ReadAllText(sourceFilePath, Encoding.UTF8);
-            string[] lines = lineSplitRegex.Split(allText); // פיצול רק לפי LF שלא מגיע אחרי CR
+            string[] lines = new Regex(@"(?<!\r)\n").Split(allText);
 
             using (var writer = new StreamWriter(destinationFilePath, false, Encoding.UTF8))
             {
-                writer.NewLine = "\n"; // הגדרת סוף שורה ל-LF באופן מפורש
+                writer.NewLine = "\n";
                 foreach (string line in lines)
                 {
-                    string cleanedLine = line.Trim().Replace("\r", ""); // הסרת CR אם נשאר בסוף שורה
+                    string cleanedLine = line.Trim().Replace("\r", "");
+
+                    if (string.IsNullOrWhiteSpace(cleanedLine.Replace("\t", "").Replace("\u00A0", "")))
+                    {
+                        continue;
+                    }
+
                     string[] columns = cleanedLine.Split(',');
 
                     if (columns.Length >= 1)
                     {
                         string columnA = columns[0];
-                        string remainingContent = columns.Length > 1 ? string.Join(",", columns.Skip(1)) : "";
-                        string cleanedContent = RemoveHtmlTags(remainingContent);
+                        string originalRemainingContent = columns.Length > 1 ? string.Join(",", columns.Skip(1)) : "";
+
+                        // **השינוי המרכזי כאן:** נקה את כל ה-HTML מ-remainingContent בתחילת התהליך
+                        string cleanRemainingContent = RemoveHtmlTags(originalRemainingContent);
+
                         string extractedEquipmentString = "";
 
-                        MatchCollection matches = searchRegex.Matches(cleanedContent);
+                        // כעת, החיפוש יתבצע על הטקסט הנקי מ-HTML
+                        MatchCollection matches = searchRegex.Matches(cleanRemainingContent);
 
                         if (matches.Count > 0)
                         {
                             extractedEquipmentString = string.Join("\t", matches.Select(match =>
                             {
-                                string textAfterPhrase = cleanedContent.Substring(match.Index + match.Length).Trim();
+                                // התחלה של הטקסט לאחר הביטוי המבוקש ("ציוד נדרש:") בטקסט הנקי.
+                                // מכיוון שהטקסט כבר נקי מ-HTML, אין צורך לדלג על תגיות <strong>/<b> ספציפיות.
+                                string currentSegment = cleanRemainingContent.Substring(match.Index + match.Length).Trim();
 
-                                // מציאת המיקום של תגית HTML פותחת/סוגרת חדשה שאינה STRONG
-                                Match htmlMatch = htmlTagRegex.Match(textAfterPhrase);
-                                int indexHtmlTag = htmlMatch.Success ? htmlMatch.Index : -1;
+                                int endIndex = currentSegment.Length;
 
-                                int indexDot = textAfterPhrase.IndexOf('.');
-                                int indexMahaloch = textAfterPhrase.IndexOf("מהלך הפעולה");
-                                int indexHashtags = textAfterPhrase.IndexOf("!#!#");
+                                // חיפוש המיקום הראשון של אחת ממילות העצירה
+                                foreach (string stopPhrase in stopPhrases)
+                                {
+                                    int index = currentSegment.IndexOf(stopPhrase);
+                                    if (index != -1 && index < endIndex)
+                                    {
+                                        endIndex = index;
+                                    }
+                                }
 
-                                int endIndex = textAfterPhrase.Length;
-                                if (indexDot != -1 && indexDot < endIndex) endIndex = indexDot;
-                                if (indexMahaloch != -1 && indexMahaloch < endIndex) endIndex = indexMahaloch;
-                                if (indexHashtags != -1 && indexHashtags < endIndex) endIndex = indexHashtags;
-                                if (indexHtmlTag != -1 && indexHtmlTag < endIndex) endIndex = indexHtmlTag; // הוספת התנאי החדש
+                                // מכיוון ש-currentSegment כבר נקי מ-HTML, בדיקה זו של htmlMatch מיותרת.
+                                // אך אם תרצה להשאיר אותה למקרה של תגיות HTML שעדיין נותרו מסיבה כלשהי, זה לא יזיק.
+                                // כרגע, היא פשוט לא תמצא כלום אם RemoveHtmlTags עבד כראוי.
+                                // Match htmlMatch = htmlTagRegex.Match(currentSegment);
+                                // if (htmlMatch.Success && htmlMatch.Index < endIndex)
+                                // {
+                                //     endIndex = htmlMatch.Index;
+                                // }
 
-                                string textToSplit = textAfterPhrase.Substring(0, endIndex).Trim();
+                                string textToSplit = currentSegment.Substring(0, endIndex).Trim();
                                 string cleanedAndSplit = SplitAndClean(textToSplit);
                                 return string.Join("\t", cleanedAndSplit.Split('\t'));
                             }).ToArray());
                         }
 
-                        writer.WriteLine(columnA + (string.IsNullOrEmpty(extractedEquipmentString) ? "" : "\t" + extractedEquipmentString));
+                        writer.WriteLine(columnA + (string.IsNullOrEmpty(extractedEquipmentString) ? "" : "\t" + extractedEquipmentString.Replace("\n", " ")));
                     }
                 }
             }
@@ -131,7 +155,7 @@ public class CsvProcessor
         string sourceFile = @"C:\Users\Chanif\Desktop\C#\CopyExcelFileEquipment\data.csv";
         string destinationFile = @"C:\Users\Chanif\Desktop\C#\CopyExcelFileEquipment\fixDataE.csv";
 
-        ProcessCsvReadAllText(sourceFile, destinationFile); // ודא שאתה משתמש במתודה הזו
+        ProcessCsvReadAllText(sourceFile, destinationFile);
         Console.ReadKey();
     }
 }
